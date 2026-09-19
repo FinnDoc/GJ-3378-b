@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+news.db
+.idea/
+.vscode/
+КАК_ЭТО_РАБОТАЕТ.md
