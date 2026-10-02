@@ -13,8 +13,9 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 
-# Для учебной работы ключ лежит в коде. В настоящей системе его держат в секрете.
-SECRET_KEY = "lab1-news-portal-secret-change-me"
+# Ключ берётся из переменной окружения SECRET_KEY. Значение по умолчанию —
+# только для локального запуска лабораторной, на сервере его обязательно задают.
+SECRET_KEY = os.getenv("SECRET_KEY", "lab1-news-portal-secret-change-me")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 12
 

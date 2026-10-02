@@ -53,6 +53,7 @@ class NewsRead(BaseModel):
     content: str
     category: str
     author: str
+    owner_id: int | None
     published_at: datetime
     is_published: bool
     created_at: datetime

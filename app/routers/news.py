@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_
+from sqlalchemy import false, func, or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import get_current_user, get_optional_user
-from app.models import News, User
+from app.models import News, User, utc_now
 from app.schemas import (
     NewsCreate,
     NewsListResponse,
@@ -22,11 +22,34 @@ def _apply_visibility(query, user: User | None, is_published: bool | None):
     """Гость видит только опубликованное. Редактор может смотреть черновики."""
     if user is None:
         if is_published is False:
-            return query.filter(News.id == -1)
+            return query.filter(false())
         return query.filter(News.is_published.is_(True))
     if is_published is not None:
         return query.filter(News.is_published == is_published)
     return query
+
+
+def _get_own_news(db: Session, news_id: int, user: User) -> News:
+    """Править и удалять новость может только тот, кто её создал."""
+    item = db.query(News).filter(News.id == news_id).first()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Новость не найдена")
+    if item.owner_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Можно изменять только свои новости",
+        )
+    return item
+
+
+def _apply_changes(item: News, data: dict) -> None:
+    was_published = item.is_published
+    for key, value in data.items():
+        if isinstance(value, str):
+            value = value.strip()
+        setattr(item, key, value)
+    if not was_published and item.is_published:
+        item.published_at = utc_now()
 
 
 @router.get("/news", response_model=NewsListResponse)
@@ -45,11 +68,16 @@ def list_news(
     query = _apply_visibility(query, user, is_published)
 
     if category:
-        query = query.filter(News.category.ilike(category))
+        query = query.filter(func.py_lower(News.category) == category.strip().lower())
 
     if q:
-        like = f"%{q}%"
-        query = query.filter(or_(News.title.ilike(like), News.content.ilike(like)))
+        needle = q.strip().lower()
+        query = query.filter(
+            or_(
+                func.py_lower(News.title).contains(needle, autoescape=True),
+                func.py_lower(News.content).contains(needle, autoescape=True),
+            )
+        )
 
     sort_column = {
         "published_at": News.published_at,
@@ -88,6 +116,7 @@ def create_news(
         content=payload.content.strip(),
         category=payload.category.strip(),
         author=(payload.author or current_user.username).strip(),
+        owner_id=current_user.id,
         is_published=payload.is_published,
     )
     db.add(item)
@@ -97,25 +126,35 @@ def create_news(
 
 
 @router.put("/news/{news_id}", response_model=NewsRead)
+def replace_news(
+    news_id: int,
+    payload: NewsCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Полная замена: нужно прислать все поля, как при создании."""
+    item = _get_own_news(db, news_id, current_user)
+    data = payload.model_dump()
+    data["author"] = data["author"] or current_user.username
+    _apply_changes(item, data)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.patch("/news/{news_id}", response_model=NewsRead)
 def update_news(
     news_id: int,
     payload: NewsUpdate,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    item = db.query(News).filter(News.id == news_id).first()
-    if item is None:
-        raise HTTPException(status_code=404, detail="Новость не найдена")
-
+    """Частичное изменение: присылаются только те поля, которые меняем."""
+    item = _get_own_news(db, news_id, current_user)
     data = payload.model_dump(exclude_unset=True)
     if not data:
         raise HTTPException(status_code=400, detail="Нет полей для обновления")
-
-    for key, value in data.items():
-        if isinstance(value, str):
-            value = value.strip()
-        setattr(item, key, value)
-
+    _apply_changes(item, data)
     db.commit()
     db.refresh(item)
     return item
@@ -125,11 +164,9 @@ def update_news(
 def delete_news(
     news_id: int,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    item = db.query(News).filter(News.id == news_id).first()
-    if item is None:
-        raise HTTPException(status_code=404, detail="Новость не найдена")
+    item = _get_own_news(db, news_id, current_user)
     db.delete(item)
     db.commit()
     return None
@@ -148,13 +185,19 @@ def list_categories(db: Session = Depends(get_db)):
 
 
 @router.get("/stats", response_model=StatsResponse)
-def news_stats(db: Session = Depends(get_db)):
-    total = db.query(func.count(News.id)).scalar() or 0
+def news_stats(
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+):
+    """Гость видит статистику только по опубликованным новостям."""
+    visible = [] if user is not None else [News.is_published.is_(True)]
+    total = db.query(func.count(News.id)).filter(*visible).scalar() or 0
     published = (
         db.query(func.count(News.id)).filter(News.is_published.is_(True)).scalar() or 0
     )
     by_category_rows = (
         db.query(News.category, func.count(News.id))
+        .filter(*visible)
         .group_by(News.category)
         .order_by(News.category)
         .all()

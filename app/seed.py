@@ -1,10 +1,10 @@
 """Стартовые данные, чтобы API сразу было чем показать в Swagger."""
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from sqlalchemy.orm import Session
 
-from app.models import News, User
+from app.models import News, User, utc_now
 from app.security import hash_password
 
 DEMO_PASSWORD = "admin123"
@@ -70,14 +70,15 @@ SEED_NEWS = [
 
 
 def seed_if_empty(db: Session) -> None:
-    if db.query(User).count() == 0:
-        db.add(
-            User(username="admin", hashed_password=hash_password(DEMO_PASSWORD))
-        )
+    admin = db.query(User).filter(User.username == "admin").first()
+    if admin is None:
+        admin = User(username="admin", hashed_password=hash_password(DEMO_PASSWORD))
+        db.add(admin)
         db.commit()
+        db.refresh(admin)
 
     if db.query(News).count() == 0:
-        now = datetime.utcnow()
+        now = utc_now()
         for item in SEED_NEWS:
             db.add(
                 News(
@@ -85,6 +86,7 @@ def seed_if_empty(db: Session) -> None:
                     content=item["content"],
                     category=item["category"],
                     author=item["author"],
+                    owner_id=admin.id,
                     published_at=now - timedelta(days=item["days_ago"]),
                     is_published=item["is_published"],
                 )
